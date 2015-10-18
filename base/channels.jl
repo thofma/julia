@@ -44,7 +44,7 @@ type InvalidStateException <: Exception
     state::Symbol
 end
 
-function put!(c::Channel, v, uselock=true)
+function put!(c::Channel, v, uselock=true, block=true)
     !isopen(c) && throw(closed_exception())
     uselock && lock(c)
     d = c.take_pos - c.put_pos
@@ -69,9 +69,14 @@ function put!(c::Channel, v, uselock=true)
             c.take_pos = 1
             c.data = newdata
         else
-            uselock && unlock(c)
-            wait(c.cond_put)
-            uselock && lock(c)
+            if block
+                uselock && unlock(c)
+                wait(c.cond_put)
+                uselock && lock(c)
+            else
+                uselock && unlock(c)
+                return nothing  # temporary workaround
+            end
         end
     end
 
@@ -89,8 +94,11 @@ function fetch(c::Channel)
     c.data[c.take_pos]
 end
 
-function take!(c::Channel, uselock=true)
+function take!(c::Channel, uselock=true, block=true)
     !isopen(c) && !isready(c) && throw(closed_exception())
+    if !block && !isready(c)
+        return nothing  #  temporary workaround
+    end
     wait(c)
     uselock && lock(c)
     v = c.data[c.take_pos]
@@ -146,13 +154,12 @@ next{T}(c::Channel{T}, state) = (v=get(state[]); state[]=nothing; (v, state))
 
 select_parse_error() = error("Malformed @select statement")
 
-function get_first_if_body(expr)
-    while expr.head == :block
-        expr = expr.args[2]
-    end
-    expr.head == :if || select_parse_error()
+function get_first_nonblock_expr(expr::Expr)
+    expr.head == :block && return get_first_nonblock_expr(expr.args[2])
     expr
 end
+
+get_first_nonblock_expr(x) = x
 
 function parse_select_case(clause::Expr)
     if clause.head == :call
@@ -175,20 +182,10 @@ function parse_select_case(clause::Expr)
 end
 
 parse_select_case(channel::Symbol) = (:take, channel, gensym())
+if_block_start(e::Expr) = e.head == :if
+if_block_start(x) = false
 
-macro select(expr)
-    select_cases = Any[]
-    while true
-        # Robustness to whitespace introduing blocks
-        expr = get_first_if_body(expr)
-        push!(select_cases, parse_select_case(expr.args[1]) => expr.args[2])
-        if length(expr.args)==3
-            expr = expr.args[3]
-        else
-            break
-        end
-    end
-
+function _select_block(select_cases)
     waiters = Expr(:block)
     evalers = Expr(:block)
 
@@ -237,4 +234,68 @@ macro select(expr)
         winner = take!(winner_ch)
         $evalers
     end
+end
+
+function _select_nonblock(select_cases)
+    blocks = Expr(:block)
+    for (clause, body) in select_cases
+        if clause[1] == :default
+            eval_body = quote
+                $(esc(body))
+                break
+            end
+            push!(blocks.args, eval_body)
+        elseif clause[1] == :take
+            eval_body = quote
+                $(esc(clause[3])) = take!($(esc(clause[2])), true, false)
+                if $(esc(clause[3]))!==nothing
+                    $(esc(body))
+                    break
+                end
+            end
+            push!(blocks.args, eval_body)
+        elseif clause[1] == :put
+            eval_body = quote
+                v = put!($(esc(clause[2])), $(esc(clause[3])), true, false)
+                if v !== nothing
+                    $(esc(body))
+                    break
+                end
+            end
+            push!(blocks.args, eval_body)
+        end
+    end
+    quote
+        while true
+            $blocks
+        end
+    end
+end
+
+macro select(expr)
+    select_cases = Any[]
+    mode = :block
+    while true
+        # Robustness to whitespace that introduces blocks
+        expr = get_first_nonblock_expr(expr)
+        if if_block_start(expr)
+            push!(select_cases, parse_select_case(expr.args[1]) => expr.args[2])
+        else
+            push!(select_cases, (:default, nothing, nothing) => expr)
+            mode = :nonblock
+            break
+        end
+        if length(expr.args)==3
+            expr = expr.args[3]
+        else
+            break
+        end
+    end
+
+    if mode == :block
+        _select_block(select_cases)
+    elseif mode == :nonblock
+        _select_nonblock(select_cases)
+    end
+
 end
