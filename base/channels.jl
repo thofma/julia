@@ -7,6 +7,8 @@ type Channel{T} <: AbstractChannel{T}
     cond_put::Condition     # waiting for a writeable slot
     state::Symbol
 
+    lock::ReentrantLock
+
     data::Array{T,1}
     szp1::Int               # current channel size plus one
     sz_max::Int             # maximum size of channel
@@ -16,9 +18,13 @@ type Channel{T} <: AbstractChannel{T}
     function Channel(sz)
         sz_max = sz == typemax(Int) ? typemax(Int) - 1 : sz
         szp1 = sz > 32 ? 33 : sz+1
-        new(Condition(), Condition(), :open,
+        new(Condition(), Condition(), :open, ReentrantLock(),
             Array(T, szp1), szp1, sz_max, 1, 1)
     end
+end
+
+for op in [:lock, :unlock]
+    @eval $op(c::Channel) = $op(c.lock)
 end
 
 const DEF_CHANNEL_SZ=32
@@ -38,8 +44,9 @@ type InvalidStateException <: Exception
     state::Symbol
 end
 
-function put!(c::Channel, v)
+function put!(c::Channel, v, uselock=true)
     !isopen(c) && throw(closed_exception())
+    uselock && lock(c)
     d = c.take_pos - c.put_pos
     if (d == 1) || (d == -(c.szp1-1))
         # grow the channel if possible
@@ -62,13 +69,16 @@ function put!(c::Channel, v)
             c.take_pos = 1
             c.data = newdata
         else
+            uselock && unlock(c)
             wait(c.cond_put)
+            uselock && lock(c)
         end
     end
 
     c.data[c.put_pos] = v
     c.put_pos = (c.put_pos == c.szp1 ? 1 : c.put_pos + 1)
     notify(c.cond_take, nothing, true, false)  # notify all, since some of the waiters may be on a "fetch" call.
+    uselock && unlock(c)
     v
 end
 
@@ -79,12 +89,14 @@ function fetch(c::Channel)
     c.data[c.take_pos]
 end
 
-function take!(c::Channel)
+function take!(c::Channel, uselock=true)
     !isopen(c) && !isready(c) && throw(closed_exception())
     wait(c)
+    uselock && lock(c)
     v = c.data[c.take_pos]
     c.take_pos = (c.take_pos == c.szp1 ? 1 : c.take_pos + 1)
     notify(c.cond_put, nothing, false, false) # notify only one, since only one slot has become available for a put!.
+    uselock && unlock(c)
     v
 end
 
@@ -131,3 +143,98 @@ function done(c::Channel, state::Ref)
     end
 end
 next{T}(c::Channel{T}, state) = (v=get(state[]); state[]=nothing; (v, state))
+
+select_parse_error() = error("Malformed @select statement")
+
+function get_first_if_body(expr)
+    while expr.head == :block
+        expr = expr.args[2]
+    end
+    expr.head == :if || select_parse_error()
+    expr
+end
+
+function parse_select_case(clause::Expr)
+    if clause.head == :call
+        if clause.args[1] == :|>
+            if length(clause.args) == 3
+                return (:take, clause.args[2], clause.args[3])
+            else
+                select_parse_error()
+            end
+        elseif clause.args[1] == :<|
+            if length(clause.args) == 3
+                return (:put, clause.args[3], clause.args[2])
+            else
+                select_parse_error()
+            end
+        else
+            return (:take, clause.args[2], gensym())
+        end
+    end
+end
+
+parse_select_case(channel::Symbol) = (:take, channel, gensym())
+
+macro select(expr)
+    select_cases = Any[]
+    while true
+        # Robustness to whitespace introduing blocks
+        expr = get_first_if_body(expr)
+        push!(select_cases, parse_select_case(expr.args[1]) => expr.args[2])
+        if length(expr.args)==3
+            expr = expr.args[3]
+        else
+            break
+        end
+    end
+
+    waiters = Expr(:block)
+    evalers = Expr(:block)
+
+    for (i, (clause, body)) in enumerate(select_cases)
+        if clause[1] == :take
+            wait_body = quote
+                @schedule begin
+                    wait($(clause[2]))
+                    lock($(clause[2]))
+                    put!(winner_ch, $i)
+                end
+            end
+        elseif clause[1] == :put
+            wait_body = quote
+                @schedule begin
+                    wait($(clause[2]).cond_put)
+                    lock($(clause[2]))
+                    put!(winner_ch, $i)
+                end
+            end
+        end
+        push!(waiters.args, wait_body)
+        if clause[1] == :take
+            eval_body = quote
+                if winner == $i
+                    $(clause[3]) = take!($(clause[2]), false)
+                    unlock($(clause[2]))
+                    $body
+                end
+            end
+        elseif clause[1] == :put
+            eval_body = quote
+                if winner == $i
+                    put!($(clause[2]), $(clause[3]), false)
+                    unlock($(clause[2]))
+                    $body
+                end
+            end
+        end
+        push!(evalers.args, eval_body)
+    end
+
+    quote
+        winner_ch = Channel{Int}(1)
+        $waiters
+        winner = take!(winner_ch)
+        $evalers
+    end
+end
