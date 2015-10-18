@@ -1388,6 +1388,7 @@ export
     @sync,
     @async,
     @task,
+    @select,
 
     # multiprocessing
     @spawn,

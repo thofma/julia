@@ -164,7 +164,7 @@ function parse_select_case(clause::Expr)
             end
         elseif clause.args[1] == :<|
             if length(clause.args) == 3
-                return (:put, clause.args[3], clause.args[2])
+                return (:put, clause.args[2], clause.args[3])
             else
                 select_parse_error()
             end
@@ -196,16 +196,16 @@ macro select(expr)
         if clause[1] == :take
             wait_body = quote
                 @schedule begin
-                    wait($(clause[2]))
-                    lock($(clause[2]))
+                    wait($(esc(clause[2])))
+                    lock($(esc(clause[2])))
                     put!(winner_ch, $i)
                 end
             end
         elseif clause[1] == :put
             wait_body = quote
                 @schedule begin
-                    wait($(clause[2]).cond_put)
-                    lock($(clause[2]))
+                    wait($(esc(clause[2])).cond_put)
+                    lock($(esc(clause[2])))
                     put!(winner_ch, $i)
                 end
             end
@@ -214,17 +214,17 @@ macro select(expr)
         if clause[1] == :take
             eval_body = quote
                 if winner == $i
-                    $(clause[3]) = take!($(clause[2]), false)
-                    unlock($(clause[2]))
-                    $body
+                    $(esc(clause[3])) = take!($(esc(clause[2])), false)
+                    unlock($(esc(clause[2])))
+                    $(esc(body))
                 end
             end
         elseif clause[1] == :put
             eval_body = quote
                 if winner == $i
-                    put!($(clause[2]), $(clause[3]), false)
-                    unlock($(clause[2]))
-                    $body
+                    put!($(esc(clause[2])), $(esc(clause[3])), false)
+                    unlock($(esc(clause[2])))
+                    $(esc(body))
                 end
             end
         end
