@@ -67,3 +67,8 @@ end
 @test select_nonblock_test(:take) == "Got 1 from c"
 @test select_nonblock_test(:put) == "Wrote to c2"
 @test select_nonblock_test(:default) == "Default case"
+
+let c = Channel(1)
+    @test select([(:take, c, nothing), (:put, c, :msg)]) == (2, :msg)
+    @test select([(:take, c, nothing), (:put, c, :msg)]) == (1, :msg)
+end

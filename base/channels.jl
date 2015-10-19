@@ -196,14 +196,16 @@ function _select_block(select_cases)
                     wait($(esc(clause[2])))
                     lock($(esc(clause[2])))
                     put!(winner_ch, $i)
+                    unlock($(esc(clause[2])))
                 end
             end
         elseif clause[1] == :put
             wait_body = quote
                 @schedule begin
-                    wait($(esc(clause[2])).cond_put)
+                    wait_put($(esc(clause[2])))
                     lock($(esc(clause[2])))
                     put!(winner_ch, $i)
+                    unlock($(esc(clause[2])))
                 end
             end
         end
@@ -212,7 +214,6 @@ function _select_block(select_cases)
             eval_body = quote
                 if winner == $i
                     $(esc(clause[3])) = take!($(esc(clause[2])), false)
-                    unlock($(esc(clause[2])))
                     $(esc(body))
                 end
             end
@@ -220,7 +221,6 @@ function _select_block(select_cases)
             eval_body = quote
                 if winner == $i
                     put!($(esc(clause[2])), $(esc(clause[3])), false)
-                    unlock($(esc(clause[2])))
                     $(esc(body))
                 end
             end
@@ -298,4 +298,61 @@ macro select(expr)
         _select_nonblock(select_cases)
     end
 
+end
+
+function select(cases, default_case)
+    for (i, (kind, ch, value)) in enumerate(cases)
+        if kind == :take
+            val = take!(ch, true, false)
+            val!==nothing && return (i, val)
+        elseif kind == :put
+            val = put!(ch, value, true, false)
+            val!==nothing && return (i, val)
+        end
+    end
+    return (0, 0)
+end
+
+function isready_put(c::Channel)
+    d = c.take_pos - c.put_pos
+    if (d == 1) || (d == -(c.szp1-1))
+        (c.szp1-1) < c.sz_max || return false
+    end
+    return true
+end
+
+function wait_put(c::Channel)
+    while !isready_put(c)
+        wait(c.cond_put)
+    end
+    nothing
+end
+
+function select(cases)
+    winner_ch = Channel{Int}(1)
+    for (i, (kind, ch, value)) in enumerate(cases)
+        if kind == :take
+            @schedule begin
+                wait(ch)
+                lock(ch)
+                put!(winner_ch, i)
+                unlock(ch)
+            end
+        elseif kind == :put
+            @schedule begin
+                wait_put(ch)
+                lock(ch)
+                put!(winner_ch, i)
+                unlock(ch)
+            end
+        end
+    end
+    winner = take!(winner_ch)
+    kind, ch, value = cases[winner]
+    if kind == :take
+        ret =  take!(ch, false)
+    elseif kind == :put
+        ret = put!(ch, value, false)
+    end
+    winner, ret
 end
