@@ -185,6 +185,14 @@ parse_select_case(channel::Symbol) = (:take, channel, gensym())
 if_block_start(e::Expr) = e.head == :if
 if_block_start(x) = false
 
+for op in [:lock, :unlock, :take!, :put!]
+    let _op = Symbol("_$op")
+        @eval $_op(c::AbstractChannel, args...) = $op(c, args...)
+        @eval $_op(x, args...) = nothing
+    end
+end
+_take!(x::Task, args...) = x.result
+
 function _select_block(select_cases)
     waiters = Expr(:block)
     evalers = Expr(:block)
@@ -194,18 +202,18 @@ function _select_block(select_cases)
             wait_body = quote
                 @schedule begin
                     wait($(esc(clause[2])))
-                    lock($(esc(clause[2])))
+                    _lock($(esc(clause[2])))
                     put!(winner_ch, $i)
-                    unlock($(esc(clause[2])))
+                    _unlock($(esc(clause[2])))
                 end
             end
         elseif clause[1] == :put
             wait_body = quote
                 @schedule begin
                     wait_put($(esc(clause[2])))
-                    lock($(esc(clause[2])))
+                    _lock($(esc(clause[2])))
                     put!(winner_ch, $i)
-                    unlock($(esc(clause[2])))
+                    _unlock($(esc(clause[2])))
                 end
             end
         end
@@ -213,14 +221,14 @@ function _select_block(select_cases)
         if clause[1] == :take
             eval_body = quote
                 if winner == $i
-                    $(esc(clause[3])) = take!($(esc(clause[2])), false)
+                    $(esc(clause[3])) = _take!($(esc(clause[2])), false)
                     $(esc(body))
                 end
             end
         elseif clause[1] == :put
             eval_body = quote
                 if winner == $i
-                    put!($(esc(clause[2])), $(esc(clause[3])), false)
+                    _put!($(esc(clause[2])), $(esc(clause[3])), false)
                     $(esc(body))
                 end
             end
@@ -247,7 +255,7 @@ function _select_nonblock(select_cases)
             push!(blocks.args, eval_body)
         elseif clause[1] == :take
             eval_body = quote
-                $(esc(clause[3])) = take!($(esc(clause[2])), true, false)
+                $(esc(clause[3])) = _take!($(esc(clause[2])), true, false)
                 if $(esc(clause[3]))!==nothing
                     $(esc(body))
                     break
@@ -256,7 +264,7 @@ function _select_nonblock(select_cases)
             push!(blocks.args, eval_body)
         elseif clause[1] == :put
             eval_body = quote
-                v = put!($(esc(clause[2])), $(esc(clause[3])), true, false)
+                v = _put!($(esc(clause[2])), $(esc(clause[3])), true, false)
                 if v !== nothing
                     $(esc(body))
                     break
@@ -303,10 +311,10 @@ end
 function select(cases, default_case)
     for (i, (kind, ch, value)) in enumerate(cases)
         if kind == :take
-            val = take!(ch, true, false)
+            val = _take!(ch, true, false)
             val!==nothing && return (i, val)
         elseif kind == :put
-            val = put!(ch, value, true, false)
+            val = _put!(ch, value, true, false)
             val!==nothing && return (i, val)
         end
     end

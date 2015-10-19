@@ -1,6 +1,6 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
-function select_block_test(t1, t2, t3)
+function select_block_test(t1, t2, t3, t4)
     c1 = Channel{Symbol}(1)
     c2 = Channel{Int}(1)
     c3 = Channel(1)
@@ -24,6 +24,11 @@ function select_block_test(t1, t2, t3)
         take!(c3)
     end
 
+    task = @schedule begin
+        sleep(t4)
+        :task_done
+    end
+
     @select begin
         if c1 |> x
             response = "Got $x from c1"
@@ -31,15 +36,18 @@ function select_block_test(t1, t2, t3)
             response = "Got a message from c2"
         elseif c3 <| :write_test
             response = "Wrote to c3"
+        elseif task |> z
+            response = "Task finished with $z"
         end
     end
 
     response
 end
 
-@test select_block_test(.5, 1, 1) == "Got a from c1"
-@test select_block_test(1, .5, 1) == "Got a message from c2"
-@test select_block_test(1, 1, .5) == "Wrote to c3"
+@test select_block_test(.5, 1, 1, 1) == "Got a from c1"
+@test select_block_test(1, .5, 1, 1) == "Got a message from c2"
+@test select_block_test(1, 1, .5, 1) == "Wrote to c3"
+@test select_block_test(1, 1, 1, .5) == "Task finished with task_done"
 
 function select_nonblock_test(test)
     c = Channel(1)
